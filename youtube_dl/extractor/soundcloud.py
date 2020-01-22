@@ -9,10 +9,13 @@ from .common import (
     SearchInfoExtractor
 )
 from ..compat import (
+    compat_HTTPError,
+    compat_kwargs,
     compat_str,
     compat_urlparse,
 )
 from ..utils import (
+    error_to_compat_str,
     ExtractorError,
     float_or_none,
     HEADRequest,
@@ -93,7 +96,7 @@ class SoundcloudIE(InfoExtractor):
                 'repost_count': int,
             }
         },
-        # not streamable song
+        # not streamable song, preview
         {
             'url': 'https://soundcloud.com/the-concept-band/goldrushed-mastered?in=the-concept-band/sets/the-royal-concept-ep',
             'info_dict': {
@@ -116,7 +119,6 @@ class SoundcloudIE(InfoExtractor):
                 # rtmp
                 'skip_download': True,
             },
-            'skip': 'Preview',
         },
         # private link
         {
@@ -255,7 +257,6 @@ class SoundcloudIE(InfoExtractor):
     _API_BASE = 'https://api.soundcloud.com/'
     _API_V2_BASE = 'https://api-v2.soundcloud.com/'
     _BASE_URL = 'https://soundcloud.com/'
-    _CLIENT_ID = 'YUKXoArFcqrlQn9tfNHvvyfnDISj04zk'
     _IMAGE_REPL_RE = r'-([0-9a-z]+)\.jpg'
 
     _ARTWORK_MAP = {
@@ -271,9 +272,49 @@ class SoundcloudIE(InfoExtractor):
         'original': 0,
     }
 
+    def _store_client_id(self, client_id):
+        self._downloader.cache.store('soundcloud', 'client_id', client_id)
+
+    def _update_client_id(self):
+        webpage = self._download_webpage('https://soundcloud.com/', None)
+        for src in reversed(re.findall(r'<script[^>]+src="([^"]+)"', webpage)):
+            script = self._download_webpage(src, None, fatal=False)
+            if script:
+                client_id = self._search_regex(
+                    r'client_id\s*:\s*"([0-9a-zA-Z]{32})"',
+                    script, 'client id', default=None)
+                if client_id:
+                    self._CLIENT_ID = client_id
+                    self._store_client_id(client_id)
+                    return
+        raise ExtractorError('Unable to extract client id')
+
+    def _download_json(self, *args, **kwargs):
+        non_fatal = kwargs.get('fatal') is False
+        if non_fatal:
+            del kwargs['fatal']
+        query = kwargs.get('query', {}).copy()
+        for _ in range(2):
+            query['client_id'] = self._CLIENT_ID
+            kwargs['query'] = query
+            try:
+                return super(SoundcloudIE, self)._download_json(*args, **compat_kwargs(kwargs))
+            except ExtractorError as e:
+                if isinstance(e.cause, compat_HTTPError) and e.cause.code == 401:
+                    self._store_client_id(None)
+                    self._update_client_id()
+                    continue
+                elif non_fatal:
+                    self._downloader.report_warning(error_to_compat_str(e))
+                    return False
+                raise
+
+    def _real_initialize(self):
+        self._CLIENT_ID = self._downloader.cache.load('soundcloud', 'client_id') or 'YUKXoArFcqrlQn9tfNHvvyfnDISj04zk'
+
     @classmethod
     def _resolv_url(cls, url):
-        return SoundcloudIE._API_V2_BASE + 'resolve?url=' + url + '&client_id=' + cls._CLIENT_ID
+        return SoundcloudIE._API_V2_BASE + 'resolve?url=' + url
 
     def _extract_info_dict(self, info, full_title=None, secret_token=None, version=2):
         track_id = compat_str(info['id'])
@@ -304,9 +345,9 @@ class SoundcloudIE(InfoExtractor):
             })
 
         def invalid_url(url):
-            return not url or url in format_urls or re.search(r'/(?:preview|playlist)/0/30/', url)
+            return not url or url in format_urls
 
-        def add_format(f, protocol):
+        def add_format(f, protocol, is_preview=False):
             mobj = re.search(r'\.(?P<abr>\d+)\.(?P<ext>[0-9a-z]{3,4})(?=[/?])', stream_url)
             if mobj:
                 for k, v in mobj.groupdict().items():
@@ -319,12 +360,16 @@ class SoundcloudIE(InfoExtractor):
                 v = f.get(k)
                 if v:
                     format_id_list.append(v)
+            preview = is_preview or re.search(r'/(?:preview|playlist)/0/30/', f['url'])
+            if preview:
+                format_id_list.append('preview')
             abr = f.get('abr')
             if abr:
                 f['abr'] = int(abr)
             f.update({
                 'format_id': '_'.join(format_id_list),
                 'protocol': 'm3u8_native' if protocol == 'hls' else 'http',
+                'preference': -10 if preview else None,
             })
             formats.append(f)
 
@@ -335,7 +380,7 @@ class SoundcloudIE(InfoExtractor):
             if not isinstance(t, dict):
                 continue
             format_url = url_or_none(t.get('url'))
-            if not format_url or t.get('snipped') or '/preview/' in format_url:
+            if not format_url:
                 continue
             stream = self._download_json(
                 format_url, track_id, query=query, fatal=False)
@@ -358,7 +403,8 @@ class SoundcloudIE(InfoExtractor):
             add_format({
                 'url': stream_url,
                 'ext': ext,
-            }, 'http' if protocol == 'progressive' else protocol)
+            }, 'http' if protocol == 'progressive' else protocol,
+                t.get('snipped') or '/preview/' in format_url)
 
         if not formats:
             # Old API, does not work for some tracks (e.g.
@@ -451,9 +497,7 @@ class SoundcloudIE(InfoExtractor):
 
         track_id = mobj.group('track_id')
 
-        query = {
-            'client_id': self._CLIENT_ID,
-        }
+        query = {}
         if track_id:
             info_json_url = self._API_V2_BASE + 'tracks/' + track_id
             full_title = track_id
@@ -536,7 +580,6 @@ class SoundcloudPagedPlaylistBaseIE(SoundcloudPlaylistBaseIE):
     def _extract_playlist(self, base_url, playlist_id, playlist_title):
         COMMON_QUERY = {
             'limit': 2000000000,
-            'client_id': self._CLIENT_ID,
             'linked_partitioning': '1',
         }
 
@@ -722,9 +765,7 @@ class SoundcloudPlaylistIE(SoundcloudPlaylistBaseIE):
         mobj = re.match(self._VALID_URL, url)
         playlist_id = mobj.group('id')
 
-        query = {
-            'client_id': self._CLIENT_ID,
-        }
+        query = {}
         token = mobj.group('token')
         if token:
             query['secret_token'] = token
@@ -761,7 +802,6 @@ class SoundcloudSearchIE(SearchInfoExtractor, SoundcloudIE):
             self._MAX_RESULTS_PER_PAGE)
         query.update({
             'limit': limit,
-            'client_id': self._CLIENT_ID,
             'linked_partitioning': 1,
             'offset': 0,
         })

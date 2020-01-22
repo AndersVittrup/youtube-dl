@@ -628,7 +628,6 @@
  - **OutsideTV**
  - **PacktPub**
  - **PacktPubCourse**
- - **PandaTV**: 熊猫TV
  - **pandora.tv**: 판도라TV
  - **ParamountNetwork**
  - **parliamentlive.tv**: UK parliament videos
@@ -761,6 +760,7 @@
  - **screen.yahoo:search**: Yahoo screen search
  - **Screencast**
  - **ScreencastOMatic**
+ - **ScrippsNetworks**
  - **scrippsnetworks:watch**
  - **SCTE**
  - **SCTECourse**
