@@ -4,7 +4,7 @@ from __future__ import unicode_literals
 import binascii
 import hashlib
 import re
-
+import json
 
 from .common import InfoExtractor
 from ..aes import aes_cbc_decrypt
@@ -21,8 +21,7 @@ from ..utils import (
     unified_timestamp,
     update_url_query,
     url_or_none,
-    urljoin,
-    base_url
+    urljoin
 )
 
 
@@ -301,9 +300,7 @@ class DRTVIE(InfoExtractor):
 class DRTVPlaylistIE(InfoExtractor):
     _VALID_URL = r'''(?x)
                     https?://
-                        (?:
-                            (?:www\.)?(?:dr\.dk)/drtv/(?:serie|saeson)/
-                        )
+                        (?:www\.)?(?:dr\.dk|dr-massive\.com)/drtv/(?:serie|saeson)/
                         (?P<id>[\da-z_-]+)
                     '''
     _TESTS = [
@@ -313,11 +310,18 @@ class DRTVPlaylistIE(InfoExtractor):
                 'id': 'tv-avisen-21_00_160258',
                 'title': 'TV AVISEN 21:00'
             },
-            'playlist_mincount': 2,
+            'playlist_mincount': 20,
         }, {
             'url': 'https://www.dr.dk/drtv/serie/spise-med-price_43537',
             'info_dict': {
                 'id': 'spise-med-price_43537',
+                'title': 'Spise med Price'
+            },
+            'playlist_mincount': 2,
+        }, {
+            'url': 'https://www.dr.dk/drtv/saeson/spise-med-price_163641',
+            'info_dict': {
+                'id': 'spise-med-price_163641',
                 'title': 'Spise med Price'
             },
             'playlist_mincount': 2,
@@ -329,36 +333,15 @@ class DRTVPlaylistIE(InfoExtractor):
         return False if DRTVIE.suitable(url) else super(
             DRTVPlaylistIE, cls).suitable(url)
 
-    def _extract_series(self, url):
-        display_id = self._match_id(url)
-        webpage = self._download_webpage(url, display_id)
-
-        episodes = []
-        for season in re.finditer(r'href="(?P<url>/drtv/saeson/.+?)"', webpage):
-            season_url = urljoin(base_url(url), season.group('url'))
-            episodes = episodes + self._extract_episode_from_season(season_url)
-
-        if len(episodes) == 0:
-            episodes = episodes + self._extract_episode_from_season(url)
-
-        return episodes
-
-    def _extract_episode_from_season(self, url):
-        display_id = self._match_id(url)
-        webpage = self._download_webpage(url, display_id)
-
-        episodes = []
-
-        for episode in re.finditer(r'href="(?P<url>/drtv/se/.+?)"', webpage):
-            episode_url = urljoin(base_url(url), episode.group('url'))
-            episodes.append(episode_url)
-
-        return episodes
+    def _extract_json_data(self, webpage):
+        return json.loads(re.search(r'(?P<json>{"app":.*?})<\/', webpage).group('json'))
 
     def _real_extract(self, url):
         playlist_id = self._match_id(url)
-        webpage = self._download_webpage(url, playlist_id)
+        base = re.search(r'(?P<url>.*?/drtv/)', url).group()
 
+        webpage = self._download_webpage(url, playlist_id)
+        json = self._extract_json_data(webpage)
         title = self._html_search_regex(
             r'<h1 class=".*?hero__title".*?>(.+?)</h1>', webpage,
             'title', default=None)
@@ -366,13 +349,58 @@ class DRTVPlaylistIE(InfoExtractor):
         if title:
             title = re.sub(r'\s*\|\s*.+?$', '', title)
 
-        episodes = []
-        if 'serie' in url:
-            episodes = self._extract_series(url)
-        elif 'saeson' in url:
-            episodes = self._extract_episode_from_season(url)
+        def iterate_all(iterable, returned="key"):
+            """Returns an iterator that returns all keys or values
+            of a (nested) iterable.
 
-        entries = [self.url_result(ep, ie=DRTVIE.ie_key()) for ep in episodes]
+            Arguments:
+                - iterable: <list> or <dictionary>
+                - returned: <string> "key" or "value"
+            Returns:
+                - <iterator>
+            """
+
+            if isinstance(iterable, dict):
+                for key, value in iterable.items():
+                    if returned == "key":
+                        yield key
+                    elif returned == "value":
+                        if not (isinstance(value, dict) or isinstance(value, list)):
+                            yield value
+                    else:
+                        raise ValueError("'returned' keyword only accepts 'key' or 'value'.")
+                    for ret in iterate_all(value, returned=returned):
+                        yield ret
+            elif isinstance(iterable, list):
+                for el in iterable:
+                    for ret in iterate_all(el, returned=returned):
+                        yield ret
+
+        seasons = [url]
+        if 'saeson' not in url:
+            seasons = list(dict.fromkeys([
+                re.search(r'/(?P<season>saeson/[\da-z_-]+)', str(i)).group('season') for i in list(iterate_all(json, "value"))
+                if re.search(r'/(saeson/[\da-z_-]+)', str(i))
+                and i != re.search(r'drtv(?P<item>/.+)', url).group('item')
+            ]))
+
+        episodes = []
+        for season in seasons:
+            if season == url:
+                season_data = json
+            else:
+                season_url = urljoin(base, season)
+                season_display_id = self._match_id(season_url)
+                season_webpage = self._download_webpage(season_url, season_display_id)
+                season_data = self._extract_json_data(season_webpage)
+
+            episodes.extend([
+                re.search(r'/(?P<item>se/[\da-z_-]+)', str(i)).group('item') for i in list(iterate_all(season_data, "value"))
+                if re.search(r'/(se/[\da-z_-]+)', str(i))
+            ])
+        episodes = list(dict.fromkeys(episodes))
+
+        entries = [self.url_result(urljoin(base, ep), ie=DRTVIE.ie_key()) for ep in episodes]
 
         return self.playlist_result(entries, playlist_id, title)
 
