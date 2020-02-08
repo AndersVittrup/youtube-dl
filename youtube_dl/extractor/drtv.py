@@ -4,6 +4,7 @@ from __future__ import unicode_literals
 import binascii
 import hashlib
 import re
+import json
 
 
 from .common import InfoExtractor
@@ -112,6 +113,9 @@ class DRTVIE(InfoExtractor):
         'url': 'https://dr-massive.com/drtv/se/bonderoeven_71769',
         'only_matching': True,
     }]
+
+    def _extract_json_data(self, webpage):
+        return json.loads(re.search(r'(?P<json>{"app":.*?})<\/', webpage).group('json'))
 
     def _real_extract(self, url):
         video_id = self._match_id(url)
@@ -277,6 +281,10 @@ class DRTVIE(InfoExtractor):
 
         self._sort_formats(formats)
 
+        url_dist = re.search(r'/drtv(?P<url>/(?:se|episode)/[\da-z_-]+)', url).group('url')
+        json_data = self._extract_json_data(webpage)
+        item = json_data.get('cache', {}).get('page', {}).get(url_dist, {}).get('entries', {})[0].get('item', {})
+        
         return {
             'id': video_id,
             'title': title,
@@ -290,8 +298,8 @@ class DRTVIE(InfoExtractor):
             'season': str_or_none(data.get('SeasonTitle')),
             'season_number': int_or_none(data.get('SeasonNumber')),
             'season_id': str_or_none(data.get('SeasonUrn')),
-            'episode': str_or_none(data.get('EpisodeTitle')),
-            'episode_number': int_or_none(data.get('EpisodeNumber')),
+            'episode': str_or_none(data.get('EpisodeTitle') or item.get('episodeName')),
+            'episode_number': int_or_none(data.get('EpisodeNumber') or item.get('episodeNumber')),
             'release_year': int_or_none(data.get('ProductionYear')),
         }
 
