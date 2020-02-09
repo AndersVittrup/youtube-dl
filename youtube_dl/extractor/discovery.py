@@ -116,3 +116,128 @@ class DiscoveryIE(DiscoveryGoBaseIE):
             raise
 
         return self._extract_video_info(video, stream, display_id)
+
+class DiscoveryPlaylistIE(DiscoveryGoBaseIE):
+    _VALID_URL = r'''(?x)https?://
+        (?P<site>
+            go\.discovery|
+            www\.
+                (?:
+                    investigationdiscovery|
+                    discoverylife|
+                    animalplanet|
+                    ahctv|
+                    destinationamerica|
+                    sciencechannel|
+                    tlc
+                )|
+            watch\.
+                (?:
+                    hgtv|
+                    foodnetwork|
+                    travelchannel|
+                    diynetwork|
+                    cookingchanneltv|
+                    motortrend
+                )
+        )\.com/tv-shows/(?P<show_slug>[^/]+)/'''
+
+    _TESTS = [{
+        'url': 'https://www.animalplanet.com/tv-shows/lone-star-law/',
+        'info_dict': {
+            'id': 'lone-star-law',
+            'title': 'Lone Star Law'
+        },
+        'playlist_mincount': 2
+    }, {
+        'url': 'https://watch.foodnetwork.com/tv-shows/diners-drive-ins-and-dives/',
+        'info_dict': {
+            'id': 'diners-drive-ins-and-dives',
+            'title': 'Diners, Drive-Ins, And Dives'
+        },
+        'playlist_mincount': 2
+    }]
+    _GEO_COUNTRIES = ['US']
+    _GEO_BYPASS = False
+    _API_BASE_URL = 'https://api.discovery.com/v1/'
+
+    @classmethod
+    def suitable(cls, url):
+        return False if DiscoveryIE.suitable(url) else super(
+            DiscoveryPlaylistIE, cls).suitable(url)
+
+    def _real_extract(self, url):
+        site, show_slug = re.match(self._VALID_URL, url).groups()
+
+        access_token = None
+        cookies = self._get_cookies(url)
+
+        # prefer Affiliate Auth Token over Anonymous Auth Token
+        auth_storage_cookie = cookies.get('eosAf') or cookies.get('eosAn')
+        if auth_storage_cookie and auth_storage_cookie.value:
+            auth_storage = self._parse_json(compat_urllib_parse_unquote(
+                compat_urllib_parse_unquote(auth_storage_cookie.value)),
+                show_slug, fatal=False) or {}
+            access_token = auth_storage.get('a') or auth_storage.get('access_token')
+
+        if not access_token:
+            access_token = self._download_json(
+                'https://%s.com/anonymous' % site, show_slug,
+                'Downloading token JSON metadata', query={
+                    'authRel': 'authorization',
+                    'client_id': '3020a40c2356a645b4b4',
+                    'nonce': ''.join([random.choice(string.ascii_letters) for _ in range(32)]),
+                    'redirectUri': 'https://www.discovery.com/',
+                })['access_token']
+
+        headers = self.geo_verification_headers()
+        headers['Authorization'] = 'Bearer ' + access_token
+
+        try:
+            show = self._download_json(
+                self._API_BASE_URL + 'content/shows',
+                show_slug, 'Downloading content JSON metadata',
+                headers=headers, query={
+                    'slug': show_slug,
+                    'fields': 'id'
+                })[0]
+
+            seasons = self._download_json(
+                self._API_BASE_URL + 'content/seasons',
+                show_slug, 'Downloading content JSON metadata',
+                headers=headers, query={
+                    'show.id': show['id'],
+                    'fields': 'id,name,number'
+                })
+
+            episode_urls = []
+
+            for i in seasons:
+                episodes = self._download_json(
+                    self._API_BASE_URL + 'content/videos',
+                    show_slug, 'Downloading content JSON metadata',
+                    headers=headers, query={
+                        'season.id': i['id'],
+                        'embed': 'show.slug',
+                        'type': 'episode|limited|event|stunt|extra'
+                    })
+                for n in episodes:
+                    if n['socialUrl'] not in episodes:
+                        episode_urls.append(n['socialUrl'])
+        
+        except ExtractorError as e:
+            if isinstance(e.cause, compat_HTTPError) and e.cause.code in (401, 403):
+                e_description = self._parse_json(
+                    e.cause.read().decode(), show_slug)['description']
+                if 'resource not available for country' in e_description:
+                    self.raise_geo_restricted(countries=self._GEO_COUNTRIES)
+                if 'Authorized Networks' in e_description:
+                    raise ExtractorError(
+                        'This video is only available via cable service provider subscription that'
+                        ' is not currently supported. You may want to use --cookies.', expected=True)
+                raise ExtractorError(e_description)
+            raise
+
+        entries = [self.url_result(ep, ie=DiscoveryIE.ie_key()) for ep in episode_urls]
+
+        return self.playlist_result(entries, show_slug, show_slug)
