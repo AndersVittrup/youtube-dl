@@ -284,7 +284,10 @@ from .dtube import DTubeIE
 from .dvtv import DVTVIE
 from .dumpert import DumpertIE
 from .defense import DefenseGouvFrIE
-from .discovery import DiscoveryIE
+from .discovery import (
+    DiscoveryIE,
+    DiscoveryPlaylistIE
+)
 from .discoverygo import (
     DiscoveryGoIE,
     DiscoveryGoPlaylistIE,
